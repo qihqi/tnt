@@ -2,6 +2,7 @@ import numpy as np
 import torch
 
 import mlx
+import mlx.nn
 import mlx.core as mx
 from tnt.tensor import Environment, Tensor
 import llama
@@ -43,10 +44,13 @@ from torch.ops import aten
 @register_op(aten.detach)
 @register_op(aten.detach.default)
 @register_op(aten.clone.default)
+def aten_detach_default(x, *args):
+  return x
+
 @register_op(aten.view.default)
 @register_op(aten._unsafe_view.default)
-def aten_detach_default(x):
-  return x
+def aten_view(x, shape):
+  return mx.reshape(x, shape) 
 
 
 
@@ -120,12 +124,11 @@ def aten_rsqrt_default(x):
 
 @register_op(aten.add.Tensor)
 def aten_add_Tensor(a, b):
-  breakpoint()
   return a + b
 
 
 @register_op(aten._softmax.default)
-def aten__softmax_default(x, dim):
+def aten__softmax_default(x, dim, *args):
   return mlx.nn.softmax(x, dim)
 
 
@@ -210,8 +213,14 @@ def aten_pow_Tensor_Scalar(x, a):
 
 @register_op(aten.index_put_.default)
 def aten_index_put__default(inputs, indices, values):
-    inputs[indices] = values
-    return inputs
+  breakpoint()
+  indices = [slice(None) if i is None else i for i in indices]
+  inputs[indices] = values
+  return inputs
+
+@register_op(torch._C._nn._parse_to)
+def parse_to(*args, **kwargs):
+  return args[0], None, False, None
 
 
 
@@ -224,7 +233,11 @@ def mlx_tensor(torch_t):
   
 def main():
   environment.enable_torch_modes()
+  unsupported_dtype = [torch.quint8]
+  torch.utils.generate_methods_for_privateuse1_backend(for_tensor=True, for_module=True, for_storage=True, unsupported_dtype=unsupported_dtype)
   print('here', torch.arange(1, 10, 2))
+
+  device = 'privateuse1'  # note: can rename 
 
   args = llama.ModelArgs(
     dim=128,
@@ -237,19 +250,23 @@ def main():
     max_batch_size=1,
     max_seq_len=1024
   )
-  llama_model = llama.Transformer(args)
-  breakpoint()
+  llama_model = llama.Transformer(args).to(device)
 
   context_length = 128
-  inputs = torch.randint(0, 1024, (1, context_length))
-  indexes = torch.arange(0, context_length)
-  cache_indexes = torch.arange(0, context_length)
+  inputs = torch.randint(0, 1024, (1, context_length)).to(device)
+  indexes = torch.arange(0, context_length).to(device)
+  cache_indexes = torch.arange(0, context_length).to(device)
   mask = torch.full((1, 1, context_length, context_length), float('-inf'))
   mask = mask.triu(1)
+  mask = mask.to(device)
 
   a = torch.tensor([1,2,3])
   b = torch.tensor([1,2,3])
+  a = a.to(device='privateuse1')
+  b = b.to(device='privateuse1')
   print(a + b)
+  print(llama_model(inputs, indexes, cache_indexes, mask))
+
 
 if __name__ == '__main__':
   main()

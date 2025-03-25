@@ -93,7 +93,8 @@ def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0):
 
     """
     freqs = 1.0 / (theta ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim))
-    t = torch.arange(end, device=freqs.device)  # type: ignore
+    freqs = freqs
+    t = torch.arange(end)  # type: ignore
     freqs = torch.outer(t, freqs).float()  # type: ignore
     freqs_cis = torch.polar(torch.ones_like(freqs), freqs)  # complex64
     return freqs_cis
@@ -219,7 +220,7 @@ class Attention(nn.Module):
             bias=False,
         )
 
-        self.cache_k = torch.zeros(
+        cache_k = torch.zeros(
             (
                 args.max_batch_size,
                 args.max_seq_len,
@@ -227,7 +228,7 @@ class Attention(nn.Module):
                 self.head_dim,
             )
         )
-        self.cache_v = torch.zeros(
+        cache_v = torch.zeros(
             (
                 args.max_batch_size,
                 args.max_seq_len,
@@ -235,6 +236,10 @@ class Attention(nn.Module):
                 self.head_dim,
             )
         )
+        self.register_buffer('cache_k', cache_k)
+        self.register_buffer('cache_v', cache_v)
+
+
 
     def forward(
         self,
@@ -265,11 +270,9 @@ class Attention(nn.Module):
 
         xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis)
 
-        self.cache_k[:bsz, indexes] = xk
-        self.cache_v[:bsz, indexes] = xv
 
-        keys = self.cache_k[:bsz, cache_indexes]
-        values = self.cache_v[:bsz, cache_indexes]
+        keys = xq
+        values = xk 
 
         # repeat k/v heads if n_kv_heads < n_heads
         keys = repeat_kv(keys, self.n_rep)  # (bs, seqlen, n_local_heads, head_dim)

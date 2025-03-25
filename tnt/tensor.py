@@ -53,6 +53,10 @@ class Tensor(torch.Tensor):
   def data(self):
     return self
 
+  @property
+  def device(self):
+    return 'privateuse1'
+
 
 class FunctionMode(torch.overrides.TorchFunctionMode):
   """Context manager that dispatches torch function calls to JAX."""
@@ -154,9 +158,9 @@ class Environment:
 
       device = kwargs.get('device')
       if device is None:
-        device = torch.get_default_device()
+        device = torch.get_default_device().type
 
-      if device.type == 'cpu':
+      if device == 'cpu':
         r = self._run_tensor_constructor_cpu(func, args, kwargs)
         return r
 
@@ -178,15 +182,18 @@ class Environment:
       return Tensor(meta, payload, self)
 
     def _change_device(self, the_tensor, device):
-      if device is None or device == the_tensor.device:
+      if device is None:
         return the_tensor
-      old_device = the_tensor.device
-      if old_device.type == 'cpu' and device.type == 'privateuseone':
+      if not isinstance(device, str):
+        device = device.type
+      old_device = the_tensor.device.type
+
+      if old_device == 'cpu' and device == 'privateuse1':
         payload = self._torch_to_payload(the_tensor)
         with mode_utils.no_dispatch(), torch._C.DisableTorchFunction():
           meta = the_tensor.to('meta')
         return Tensor(meta, payload, self)
-      elif old_device.type == 'privateuseone' and device.type == 'cpu':
+      elif old_device == 'privateuse1' and device == 'cpu':
         return self._payload_to_torch(the_tensor.payload)
 
       # fallback
@@ -196,7 +203,7 @@ class Environment:
       
 
     def _change_dtype(self, the_tensor, dtype):
-      if the_tensor.dtype == dtype:
+      if dtype is None or the_tensor.dtype == dtype:
         return the_tensor
 
       if isinstance(the_tensor, Tensor):
@@ -212,7 +219,6 @@ class Environment:
       return self._change_dtype(the_tensor, dtype)
       
     def _torch_Tensor_to(self, args, kwargs):
-      breakpoint()
       the_tensor = args[0]
       args = args[1:]
       if len(args) >= 1 and isinstance(args[0], torch.Tensor):
@@ -264,8 +270,6 @@ class Environment:
 
     def dispatch(self, func, types, args, kwargs):
 
-      print(func)
-
       kwargs = kwargs or {}
       if func in TENSOR_CONSTRUCTORS:
         return self._handle_tensor_constructor(func, args, kwargs)
@@ -287,7 +291,6 @@ class Environment:
       op = self._get_decomposition(func)
 
       if op is None:
-        breakpoint()
         raise OperatorNotFound(
           f'Operator with name {_name_of_func(func)} has no lowering')
 
@@ -296,19 +299,8 @@ class Environment:
           torch.distributed._functional_collectives.wait_tensor,
           (args, kwargs))
 
-      if op.is_jax_function:
-        args, kwargs = self.t2j_iso((args, kwargs))
-
-      if op.needs_env:
-        kwargs['env'] = self
-
-      with self:
-        res = op.func(*args, **kwargs)
-
-      if op.is_jax_function:
-        res = self.j2t_iso(res)
-
-      return res
+      with self._function_mode, self._dispatch_mode:
+        return op(*args, **kwargs)
 
     def enable_torch_modes(self):
       self._dispatch_mode.__enter__()
