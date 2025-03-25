@@ -54,7 +54,7 @@ class Tensor(torch.Tensor):
     return self
 
 
-class XLAFunctionMode(torch.overrides.TorchFunctionMode):
+class FunctionMode(torch.overrides.TorchFunctionMode):
   """Context manager that dispatches torch function calls to JAX."""
 
   def __init__(self, env):
@@ -72,7 +72,7 @@ class XLAFunctionMode(torch.overrides.TorchFunctionMode):
     return func(*args, **(kwargs or {}))
 
 
-class XLADispatchMode(torch_dispatch.TorchDispatchMode):
+class DispatchMode(torch_dispatch.TorchDispatchMode):
 
   def __init__(self, env):
     self.env = env
@@ -110,9 +110,14 @@ TENSOR_CONSTRUCTORS = {
 
 class Environment:
 
-    def __init__(self, payload_type, torch_to_payload, payload_to_torch):
-        self._function_mode = XLAFunctionMode(self)
-        self._dispatch_mode = XLADispatchMode(self)
+    def __init__(self, payload_type, 
+                 torch_to_payload, 
+                 payload_to_torch,
+                 torch_to_payload_dtype=None,
+                 payload_to_torch_dtype=None):
+
+        self._function_mode = FunctionMode(self)
+        self._dispatch_mode = DispatchMode(self)
 
         self._ops = {}
 
@@ -133,7 +138,28 @@ class Environment:
     def register_decomposition(self, op, func):
       self._ops[op] = func
 
+    def register_default_decompositions(self):
+      decomps = torch._decomp.core_aten_decompositions()
+      self._decompositions.update(decomps)
+
+    def _run_tensor_constructor_cpu(self, func, args, kwargs):
+      # no tensor constructor registered, fallback to torch
+      with mode_utils.no_dispatch(), torch._C.DisableTorchFunction():
+        torch_tensor = func(*args, **kwargs)
+        return torch_tensor
+
+
+
     def _handle_tensor_constructor(self, func, args, kwargs):
+
+      device = kwargs.get('device')
+      if device is None:
+        device = torch.get_default_device()
+
+      if device.type == 'cpu':
+        r = self._run_tensor_constructor_cpu(func, args, kwargs)
+        return r
+
       op = self._get_op_impl(func)
       if op is not None:
         res = op(*args, **kwargs)
@@ -146,16 +172,47 @@ class Environment:
           return op(*args, **kwargs)
 
       # no tensor constructor registered, fallback to torch
-      with mode_utils.no_dispatch(), torch._C.DisableTorchFunction():
-        torch_tensor = func(*args, **kwargs)
-        payload = self._torch_to_payload(torch_tensor)
-        meta = torch_tensor.to('meta')
+      torch_tensor = self._run_tensor_constructor_cpu(func, args, kwargs)
+      payload = self._torch_to_payload(torch_tensor)
+      meta = torch_tensor.to('meta')
+      return Tensor(meta, payload, self)
+
+    def _change_device(self, the_tensor, device):
+      if device is None or device == the_tensor.device:
+        return the_tensor
+      old_device = the_tensor.device
+      if old_device.type == 'cpu' and device.type == 'privateuseone':
+        payload = self._torch_to_payload(the_tensor)
+        with mode_utils.no_dispatch(), torch._C.DisableTorchFunction():
+          meta = the_tensor.to('meta')
         return Tensor(meta, payload, self)
+      elif old_device.type == 'privateuseone' and device.type == 'cpu':
+        return self._payload_to_torch(the_tensor.payload)
+
+      # fallback
+      with mode_utils.no_dispatch(), torch._C.DisableTorchFunction():
+        return the_tensor.to(device)
+
+      
+
+    def _change_dtype(self, the_tensor, dtype):
+      if the_tensor.dtype == dtype:
+        return the_tensor
+
+      if isinstance(the_tensor, Tensor):
+        return self._call_op(torch.ops.aten.to, the_tensor, {'dtype': dtype})
+      
+      # fallback
+      with mode_utils.no_dispatch(), torch._C.DisableTorchFunction():
+        return the_tensor.to(dtype)
 
 
-
-
+    def _to_copy(self, the_tensor, dtype, device):
+      the_tensor = self._change_device(the_tensor, device)
+      return self._change_dtype(the_tensor, dtype)
+      
     def _torch_Tensor_to(self, args, kwargs):
+      breakpoint()
       the_tensor = args[0]
       args = args[1:]
       if len(args) >= 1 and isinstance(args[0], torch.Tensor):
@@ -218,7 +275,7 @@ class Environment:
       # If the func doesn't act on Tensor, and is not a tensor constructor,
       # We should skip and let torch handle it.
       
-      tensor_args = [t for t in torch_pytree.tree_flatten(args)[0] if isinstance(t, torch.Tensor)]
+      tensor_args = [t for t in torch_pytree.tree_flatten((args, kwargs))[0] if isinstance(t, torch.Tensor)]
       if tensor_args and all(not isinstance(t, Tensor) for t in tensor_args):
         return func(*args, **kwargs)
 
@@ -230,6 +287,7 @@ class Environment:
       op = self._get_decomposition(func)
 
       if op is None:
+        breakpoint()
         raise OperatorNotFound(
           f'Operator with name {_name_of_func(func)} has no lowering')
 

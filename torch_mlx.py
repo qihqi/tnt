@@ -1,3 +1,4 @@
+import numpy as np
 import torch
 
 import mlx
@@ -11,7 +12,7 @@ def torch_to_mlx(tensor):
 
 
 def mlx_to_torch(array):
-  return torch.tensor(memoryview(array))
+  return torch.from_numpy(np.array(array))
 
 
 environment = Environment(
@@ -20,9 +21,12 @@ environment = Environment(
   mlx_to_torch
 )
 
+environment.register_default_decompositions()
+
 def register_op(op):
   def inner(func):
     environment.register_op(op, func)
+    return func
   return inner
 
 # environment.register_op(
@@ -34,29 +38,9 @@ def register_op(op):
 # )
 
 
-args = llama.ModelArgs(
-  dim=128,
-  n_layers=3,
-  n_heads=8,
-  n_kv_heads=8,
-  vocab_size=32000,
-  multiple_of=256,
-  norm_eps=1e-5,
-  max_batch_size=1,
-  max_seq_len=1024
-)
-llama_model = llama.Transformer(args)
-
-context_length = 128
-inputs = torch.randint(0, 1024, (1, context_length))
-indexes = torch.arange(0, context_length)
-cache_indexes = torch.arange(0, context_length)
-mask = torch.full((1, 1, context_length, context_length), float('-inf'))
-mask = mask.triu(1)
-
-
 from torch.ops import aten
 
+@register_op(aten.detach)
 @register_op(aten.detach.default)
 @register_op(aten.clone.default)
 @register_op(aten.view.default)
@@ -227,9 +211,9 @@ def aten_pow_Tensor_Scalar(x, a):
 @register_op(aten.index_put_.default)
 def aten_index_put__default(inputs, indices, values):
     inputs[indices] = values
+    return inputs
 
 
-environment.enable_torch_modes()
 
 
 def mlx_tensor(torch_t):
@@ -238,8 +222,34 @@ def mlx_tensor(torch_t):
   return Tensor(meta, data, environment)
 
   
+def main():
+  environment.enable_torch_modes()
+  print('here', torch.arange(1, 10, 2))
 
-a = torch.tensor([1,2,3])
-b = torch.tensor([1,2,3])
-print(a + b)
+  args = llama.ModelArgs(
+    dim=128,
+    n_layers=3,
+    n_heads=8,
+    n_kv_heads=8,
+    vocab_size=32000,
+    multiple_of=256,
+    norm_eps=1e-5,
+    max_batch_size=1,
+    max_seq_len=1024
+  )
+  llama_model = llama.Transformer(args)
+  breakpoint()
 
+  context_length = 128
+  inputs = torch.randint(0, 1024, (1, context_length))
+  indexes = torch.arange(0, context_length)
+  cache_indexes = torch.arange(0, context_length)
+  mask = torch.full((1, 1, context_length, context_length), float('-inf'))
+  mask = mask.triu(1)
+
+  a = torch.tensor([1,2,3])
+  b = torch.tensor([1,2,3])
+  print(a + b)
+
+if __name__ == '__main__':
+  main()
